@@ -24,6 +24,8 @@ param(
     $AppVendor,
     $AppName,
     $AppVersion,
+    $AppDetectionName,
+    $AppDetectionVersion,
     $ScriptAuthorName,
     $IconPath,
     $AppDescription,
@@ -32,7 +34,9 @@ param(
     $AppUninstallCommand,
     $MSIProductCode,
     $Notes,
-    $InstallExperience = "system"
+    $InstallExperience = "system",
+    $CreatePackageOnly = $false,
+    $UploadOnly = $false
 )
 
 # Check The specified installer file exists
@@ -78,6 +82,8 @@ If ($InstallerFileExtension -eq ".MSI") {
 If (!$AppName) { $AppName = Read-Host "Please enter the Applicaiton Name" }
 If (!$AppVendor) { $AppVendor = Read-Host "Please enter Application Vendor" }
 If (!$AppVersion) { $AppVersion = Read-Host "Please enter the Applicaiton Version" }
+If (!$AppDetectionName) { $AppDetectionName = $AppName }
+If (!$AppDetectionVersion) { $AppDetectionVersion = $AppVersion }
 
 # $OutputPath = "$((get-item "C:\Users\david.sangan\OneDrive - Windward Group\Software Deployment\PSADT Packager").Parent.FullName)"
 If (!$OutputPath) { $OutputPath = "$((Get-Item $PSScriptRoot).Parent.FullName)" }
@@ -102,7 +108,7 @@ If (!$DescriptionPath) { $DescriptionPath = $(Get-ChildItem -Path "$OutputPath\*
 If ($DescriptionPath) { $AppDescription = Try { Get-Content $DescriptionPath -Raw }  Catch {} }
 If (!$AppDescription -and $AppName) { $AppDescription = "Installs $AppName" }
 If (!$ScriptAuthorName) { $ScriptAuthorName = $(whoami /upn) }
-If ($InstallExperience -eq "user") { $RequireAdmin = "false" } else { $RequireAdmin = "true" }
+If ($InstallExperience -eq "user") { $RequireAdmin = '$false' } else { $RequireAdmin = '$true' }
 
 # Copy Icon and description from Installer source to out if pressent for future use
 If ($(Get-Item $IconPath).Directory.FullName -ne $OutputPath) {
@@ -114,137 +120,151 @@ IF ($DescriptionPath) {
     }
 }
 
-# Copy PSADT Template
-If (Test-Path $PSADTFolder) {
-    try {
-        Remove-Item -Path $PSADTFolder -Recurse -Force -ErrorAction Stop
+If (!$UploadOnly) {
+    # Copy PSADT Template
+    If (Test-Path $PSADTFolder) {
+        try {
+            Remove-Item -Path $PSADTFolder -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            throw "$PSADTFolder exsists and could not be deleted."
+        }  
     }
-    catch {
-        throw "$PSADTFolder exsists and could not be deleted."
-    }  
+    # Copy-Item -Path "C:\Users\david.sangan\OneDrive - Windward Group\Clients\TGI\Projects\RM Repackerging\Templates\PSADT" -Destination $PSADTFolder -Recurse
+    Copy-Item -Path "$PSScriptRoot\Templates\PSADT" -Destination $PSADTFolder -Recurse
+    # Copy Install files to PSADT Files Dir
+    Copy-Item -Path "$InstallerDir\*" -Destination "$PSADTFolder\Files" -Recurse #-WhatIf
+
+    # Set Install and Uninstall Commands for EXEs
+    If ($InstallerFileExtension -eq ".EXE") {
+        If (!$AppInstallArgs) { $AppInstallArgs = Read-Host "Please enter the Applicaiton install Arguments for a silent install" }
+        #If (!$AppUninstallArgs -and !$AppUninstallCommand) { $AppUninstallArgs = Read-Host "Please enter the Applicaiton install Arguments for a silent uninstall" }
+
+        # Set Install Commands
+        $InstallCommand = "Start-ADTProcess -FilePath '$PSADTInstallerFileName' -ArgumentList '$AppInstallArgs'"
+
+        # Set Uninstall Commands
+        If ($AppUninstallCommand) {
+            $UninstallCommand = $AppUninstallCommand
+        }
+        ElseIf ($AppUninstallArgs) {
+            $UninstallCommand = "Uninstall-ADTApplication -Name  '$PSADTInstallerFileName' -ArgumentList '$AppUninstallArgs'"
+        }
+        Else {
+            $UninstallCommand = "Uninstall-ADTApplication -Name  '$PSADTInstallerFileName'"
+        }
+    }
+
+    # Set Install and Uninstall Commands for MSIs
+    If ($InstallerFileExtension -eq ".MSI") {
+        # Set default MSI Arguments if not specified
+        If (!$AppInstallArgs) {
+            $AppInstallArgs = "/QN /norestart"
+        }
+        If (!$AppUninstallArgs) {
+            $AppUninstallArgs = "/QN /norestart"
+        }
+
+        # Set Install Commands
+        $InstallCommand = "Start-ADTMsiProcess -Action 'Install' -FilePath '$PSADTInstallerFileName' -ArgumentList '$AppInstallArgs'"
+
+        # Set Uninstall Commands
+        $UninstallCommand = "Start-ADTMsiProcess -Action 'Uninstall' -FilePath '$PSADTInstallerFileName' -ArgumentList '$AppUninstallArgs'"
+    }
+
+    # Read PSADT template Script, replace place holders and write back to the file
+    $AppDeployToolkitScriptPath = "$PSADTFolder\Invoke-AppDeployToolkit.ps1"
+    $AppDeployToolkitScript = Get-Content "$AppDeployToolkitScriptPath"
+
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<AppVendor>", "$AppVendor"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<Name>", "$AppName"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<Version>", "$AppVersion"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<Date>", "$ISODate"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<AuthorName>", "$ScriptAuthorName"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<InstallCommand>", "$InstallCommand"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<UninstallCommand>", "$UninstallCommand"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<ShortcutInstallCommands>", "$ShortcutInstallCommands"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<ShortcutUninstallCommands>", "$ShortcutUninstallCommands"
+    $AppDeployToolkitScript = $AppDeployToolkitScript -replace "<RequireAdmin>", "$RequireAdmin"
+
+    $AppDeployToolkitScript | Out-File -FilePath "$AppDeployToolkitScriptPath" -Force
+
+    # Read Detection template Script, replace place holders and write back to the file
+    $AppDeployDetectionScriptPath = "$PSADTFolder\Detect-Application.ps1"
+    $AppDeployDetectionScript = Get-Content "$AppDeployDetectionScriptPath"
+
+    $AppDeployDetectionScript = $AppDeployDetectionScript -replace "<AppDetectionName>", "$AppDetectionName"
+    $AppDeployDetectionScript = $AppDeployDetectionScript -replace "<AppDetectionVersion>", "$AppDetectionVersion"
+
+    $AppDeployDetectionScript | Out-File -FilePath "$AppDeployDetectionScriptPath" -Force
 }
-# Copy-Item -Path "C:\Users\david.sangan\OneDrive - Windward Group\Clients\TGI\Projects\RM Repackerging\Templates\PSADT" -Destination $PSADTFolder -Recurse
-Copy-Item -Path "$PSScriptRoot\Templates\PSADT" -Destination $PSADTFolder -Recurse
-# Copy Install files to PSADT Files Dir
-Copy-Item -Path "$InstallerDir\*" -Destination "$PSADTFolder\Files" -Recurse #-WhatIf
 
-# Set Install and Uninstall Commands for EXEs
-If ($InstallerFileExtension -eq ".EXE") {
-    If (!$AppInstallArgs) { $AppInstallArgs = Read-Host "Please enter the Applicaiton install Arguments for a silent install" }
-    If (!$AppUninstallArgs -and !$AppUninstallCommand) { $AppUninstallArgs = Read-Host "Please enter the Applicaiton install Arguments for a silent uninstall" }
+If (!$CreatePackageOnly) {
 
-    # Set Install Commands
-    $InstallCommand = "Start-ADTProcess -FilePath '$PSADTInstallerFileName' -ArgumentList '$AppInstallArgs'"
+    ### Run Microsoft-Win32-Content-Prep-Tool-master ####
+    # Start-Process -NoNewWindow -FilePath "C:\Users\david.sangan\OneDrive - Windward Group\Clients\TGI\Projects\RM Repackerging\Microsoft-Win32-Content-Prep-Tool-master\IntuneWinAppUtil.exe" -ArgumentList "-c ""$PSADTFolder""", "-s ""Files\$AppExec""", "-o ""$OutputPath""", "-q"
+    Start-Process -NoNewWindow `
+        -FilePath "$PSScriptRoot\Microsoft-Win32-Content-Prep-Tool-master\IntuneWinAppUtil.exe" `
+        -ArgumentList "-c `"$PSADTFolder`"", "-s `"Files\$PSADTInstallerFileName`"", "-o `"$IntuneWinOut`"", "-q" `
+        -Wait
 
-    # Set Uninstall Commands
-    If ($AppUninstallCommand) {
-        $UninstallCommand = $AppUninstallCommand
+    "IntuneWin File; $IntuneWinFile"
+    If ($MSIProductCode) { "MSI Product Code; $MSIProductCode" }
+
+
+    ### Upload IntuneWin to Intune####
+    # Connect to Custom app
+    Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -RedirectUri "https://login.microsoftonline.com/common/oauth2/nativeclient"
+
+    # Create requirement rule for all platforms and Windows 10 20H2
+    $RequirementRule = New-IntuneWin32AppRequirementRule -Architecture "All" -MinimumSupportedWindowsRelease "W10_1607"
+
+    # If MSI Product code is known create MSI detection rule with it else create place holder rule to be updated manualy later.
+    if ($MSIProductCode) {
+        $DetectionRule = New-IntuneWin32AppDetectionRuleMSI -ProductCode $MSIProductCode -ProductVersionOperator "greaterThanOrEqual" -ProductVersion $AppVersion
+    }
+    else {
+        $DetectionRule = New-IntuneWin32AppDetectionRuleScript -ScriptFile $AppDeployDetectionScriptPath -RunAs32Bit $false -EnforceSignatureCheck $false   
+    }
+
+    # Prepare Icon
+    If ($IconPath) {
+        $Icon = New-IntuneWin32AppIcon -FilePath $IconPath
+    }
+
+    # Set defaults for required variables still null
+    If (!$Notes) { $Notes = "Uploaded by $ScriptAuthorName on $ISODate" }
+
+    # Add new Win32 app
+    If ($InstallExperience -eq "user") {
+        $InstallCommandLine = "Invoke-AppDeployToolkit.exe"
+        $UninstallCommandLine = "Invoke-AppDeployToolkit.exe -DeploymentType Uninstall"
     }
     Else {
-        $UninstallCommand = "Start-ADTProcess -FilePath '$PSADTInstallerFileName' -ArgumentList '$AppUninstallArgs'"
-    }
-}
-
-# Set Install and Uninstall Commands for MSIs
-If ($InstallerFileExtension -eq ".MSI") {
-    # Set default MSI Arguments if not specified
-    If (!$AppInstallArgs) {
-        $AppInstallArgs = "/QN /norestart"
-    }
-    If (!$AppUninstallArgs) {
-        $AppUninstallArgs = "/QN /norestart"
+        $InstallCommandLine = "Invoke-AppDeployToolkit.exe"
+        $UninstallCommandLine = "Invoke-AppDeployToolkit.exe -DeploymentType Uninstall"
     }
 
-    # Set Install Commands
-    $InstallCommand = "Start-ADTMsiProcess -Action 'Install' -FilePath '$PSADTInstallerFileName' -ArgumentList '$AppInstallArgs'"
+    <#
+    If (Get-IntuneWin32App -DisplayName "$AppName" | Where {$_.displayVersion -eq "$AppVersion" -and $_.publisher -eq "$AppVendor"}) {
+        "App $AppVendor $AppVersion $AppVersion already exsists, update exsisting deployment?"
+    }
+    #>
 
-    # Set Uninstall Commands
-    $UninstallCommand = "Start-ADTMsiProcess -Action 'Uninstall' -FilePath '$PSADTInstallerFileName' -ArgumentList '$AppUninstallArgs'"
+    $Win32App = Add-IntuneWin32App `
+        -FilePath $IntuneWinFile `
+        -DisplayName $AppName `
+        -Description $AppDescription `
+        -Publisher $AppVendor `
+        -AppVersion $AppVersion `
+        -InstallExperience $InstallExperience `
+        -RestartBehavior "suppress" `
+        -DetectionRule $DetectionRule `
+        -RequirementRule $RequirementRule `
+        -InstallCommandLine $InstallCommandLine `
+        -UninstallCommandLine $UninstallCommandLine `
+        -Icon $Icon `
+        -Notes $Notes
+
+    Add-IntuneWin32AppAssignmentAllUsers -ID $Win32App.id -Intent available -Notification showReboot
 }
-
-# Read PSADT template Script, replace place holders and write back to the file
-$AppDeployToolkitScriptPath = "$PSADTFolder\Invoke-AppDeployToolkit.ps1"
-$AppDeployToolkitScript = Get-Content "$AppDeployToolkitScriptPath"
-
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<AppVendor>", "$AppVendor"
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<Name>", "$AppName"
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<Version>", "$AppVersion"
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<Date>", "$ISODate"
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<AuthorName>", "$ScriptAuthorName"
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<InstallCommand>", "$InstallCommand"
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<UninstallCommand>", "$UninstallCommand"
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<ShortcutInstallCommands>", "$ShortcutInstallCommands"
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<ShortcutUninstallCommands>", "$ShortcutUninstallCommands"
-
-$AppDeployToolkitScript | Out-File -FilePath "$AppDeployToolkitScriptPath" -Force
-
-
-$AppDeployToolkitConfigPath = "$PSADTFolder\Config\config.psd1"
-$AppDeployToolkitScript = Get-Content "$AppDeployToolkitConfigPath"
-
-$AppDeployToolkitScript = $AppDeployToolkitScript -replace "<RequireAdmin>", "$RequireAdmin"
-
-$AppDeployToolkitScript | Out-File -FilePath "$AppDeployToolkitConfigPath" -Force
-
-
-### Run Microsoft-Win32-Content-Prep-Tool-master ####
-# Start-Process -NoNewWindow -FilePath "C:\Users\david.sangan\OneDrive - Windward Group\Clients\TGI\Projects\RM Repackerging\Microsoft-Win32-Content-Prep-Tool-master\IntuneWinAppUtil.exe" -ArgumentList "-c ""$PSADTFolder""", "-s ""Files\$AppExec""", "-o ""$OutputPath""", "-q"
-Start-Process -NoNewWindow `
-    -FilePath "$PSScriptRoot\Microsoft-Win32-Content-Prep-Tool-master\IntuneWinAppUtil.exe" `
-    -ArgumentList "-c `"$PSADTFolder`"", "-s `"Files\$PSADTInstallerFileName`"", "-o `"$IntuneWinOut`"", "-q" `
-    -Wait
-
-"IntuneWin File; $IntuneWinFile"
-If ($MSIProductCode) { "MSI Product Code; $MSIProductCode" }
-
-
-### Upload IntuneWin to Intune####
-# Connect to Custom app
-Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -RedirectUri "https://login.microsoftonline.com/common/oauth2/nativeclient"
-
-# Create requirement rule for all platforms and Windows 10 20H2
-$RequirementRule = New-IntuneWin32AppRequirementRule -Architecture "All" -MinimumSupportedWindowsRelease "W10_1607"
-
-# If MSI Product code is known create MSI detection rule with it else create place holder rule to be updated manualy later.
-if ($MSIProductCode) {
-    $DetectionRule = New-IntuneWin32AppDetectionRuleMSI -ProductCode $MSIProductCode -ProductVersionOperator "greaterThanOrEqual" -ProductVersion $AppVersion
-}
-else {
-    # Dummy Code to allow Upload
-    $DetectionRule = New-IntuneWin32AppDetectionRuleMSI -ProductCode "42"
-}
-
-# Prepare Icon
-If ($IconPath) {
-    $Icon = New-IntuneWin32AppIcon -FilePath $IconPath
-}
-
-# Set defaults for required variables still null
-If (!$Notes) { $Notes = "Uploaded by $ScriptAuthorName on $ISODate" }
-
-# Add new Win32 app
-If ($InstallExperience -eq "user") {
-    $InstallCommandLine = "Invoke-AppDeployToolkit.exe"
-    $UninstallCommandLine = "Invoke-AppDeployToolkit.exe -DeploymentType Uninstall"
-}
-Else {
-    $InstallCommandLine = "Invoke-AppDeployToolkit.exe"
-    $UninstallCommandLine = "Invoke-AppDeployToolkit.exe -DeploymentType Uninstall"
-}
-
-$Win32App = Add-IntuneWin32App `
-    -FilePath $IntuneWinFile `
-    -DisplayName $AppName `
-    -Description $AppDescription `
-    -Publisher $AppVendor `
-    -AppVersion $AppVersion `
-    -InstallExperience $InstallExperience `
-    -RestartBehavior "suppress" `
-    -DetectionRule $DetectionRule `
-    -RequirementRule $RequirementRule `
-    -InstallCommandLine $InstallCommandLine `
-    -UninstallCommandLine $UninstallCommandLine `
-    -Icon $Icon `
-    -Notes $Notes
-
-Add-IntuneWin32AppAssignmentAllUsers -ID $Win32App.id -Intent available -Notification showReboot

@@ -100,7 +100,7 @@ $adtSession = @{
     AppScriptVersion = '1.0.0'
     AppScriptDate = '<Date>'
     AppScriptAuthor = '<AuthorName>'
-    RequireAdmin = $true
+    RequireAdmin = <RequireAdmin>
 
     # Install Titles (Only set here to override defaults set by the toolkit).
     InstallName = ''
@@ -126,7 +126,7 @@ function Install-ADTDeployment
 
     ## Show Welcome Message, close processes if specified, allow up to 3 deferrals, verify there is enough disk space to complete the install, and persist the prompt.
     $saiwParams = @{
-        AllowDefer = $true
+        AllowDefer = $false
         DeferTimes = 3
         CheckDiskSpace = $true
         PersistPrompt = $true
